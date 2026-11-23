@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebXR STL / OBJ Inspector</title>
+<style>
+  :root { --bg:#14181d; --panel:#1c2229ee; --line:#2c343e; --text:#d8e0e8; --dim:#8a97a6; --acc:#5fe3ff; --warn:#ffc23d; --err:#ff6b6b; --ok:#7be495; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  #viewport { position:fixed; inset:0; }
+  #viewport canvas { display:block; }
+  #ui { position:fixed; top:12px; left:12px; bottom:12px; width:330px; background:var(--panel); border:1px solid var(--line); border-radius:12px;
+        backdrop-filter:blur(8px); overflow-y:auto; padding:14px 16px 70px; transition:transform .25s; z-index:10; }
+  #ui.collapsed { transform:translateX(calc(-100% + 34px)); }
+  header { display:flex; align-items:center; justify-content:space-between; }
+  h1 { font-size:17px; margin:0; letter-spacing:.3px; }
+  h1 span { display:block; font-size:12px; color:var(--acc); font-weight:500; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin:18px 0 8px; display:flex; justify-content:space-between; align-items:center; }
+  button, select, input[type=color] { background:#252d36; color:var(--text); border:1px solid #34404c; border-radius:7px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.mini { padding:1px 8px; font-size:13px; }
+  .status { margin-top:10px; padding:8px 10px; border-radius:8px; background:#11151a; color:var(--dim); font-size:13px; min-height:34px; word-break:break-word; }
+  .status.ok { color:var(--ok); } .status.err { color:var(--err); }
+  .drop { display:block; border:1.5px dashed #3a4654; border-radius:10px; padding:18px 12px; text-align:center; cursor:pointer; color:var(--dim); }
+  .drop b { color:var(--acc); }
+  body.dragging .drop { border-color:var(--acc); background:#5fe3ff14; }
+  .hint { color:var(--dim); font-size:12px; margin:6px 0 0; }
+  #library { list-style:none; margin:0; padding:0; max-height:260px; overflow-y:auto; }
+  #library li { display:flex; gap:6px; margin-bottom:5px; }
+  #library li.empty { color:var(--dim); font-size:12.5px; display:block; }
+  #library .open { flex:1; text-align:left; overflow:hidden; }
+  #library .open small { display:block; color:var(--dim); font-size:11px; }
+  #library .open.current { border-color:var(--acc); }
+  #library .name { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #library .del { color:var(--err); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; }
+  .grid label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--dim); }
+  .grid label.chk { flex-direction:row; align-items:center; gap:6px; color:var(--text); font-size:13px; }
+  input[type=color] { padding:2px; height:32px; width:100%; }
+  .row { display:flex; gap:8px; margin-top:10px; } .row button { flex:1; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:3px 10px; margin:12px 0 0; font-size:12.5px; }
+  dt { color:var(--dim); } dd { margin:0; word-break:break-all; }
+  .mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; white-space:pre-wrap; color:var(--warn); }
+  table.keys { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.keys td { padding:3px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.keys td:first-child { color:var(--acc); white-space:nowrap; padding-right:10px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+    "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="viewport"></div>
+
+<aside id="ui">
+  <header>
+    <h1>STL / OBJ <span>WebXR Inspector · Z-up</span></h1>
+    <button id="collapse" class="mini" title="Hide panel">⟨</button>
+  </header>
+  <div id="status" class="status">Starting…</div>
+
+  <h2>Open / upload</h2>
+  <label class="drop" id="drop">
+    <input type="file" id="fileInput" accept=".stl,.obj" multiple hidden>
+    <b>Choose files</b> or drop .stl / .obj here
+  </label>
+  <p class="hint" id="uploadHint">Files are uploaded into the same folder as index.html.</p>
+
+  <h2>Models on server <button id="refresh" class="mini" title="Refresh">↻</button></h2>
+  <ul id="library"><li class="empty">Loading…</li></ul>
+
+  <h2>Model</h2>
+  <div class="grid">
+    <label>File units
+      <select id="units"><option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option><option value="in">inch</option></select>
+    </label>
+    <label>Up axis in file
+      <select id="upAxis"><option value="Z">Z (CAD / STL)</option><option value="Y">Y (many OBJ)</option></select>
+    </label>
+    <label>Color <input type="color" id="color" value="#9fb4c8"></label>
+    <label class="chk"><input type="checkbox" id="wire"> Wireframe</label>
+  </div>
+  <div class="row"><button id="resetBtn">Reset pose</button><button id="clearBtn">Clear measure</button></div>
+  <dl id="info"></dl>
+
+  <h2>Measure</h2>
+  <div id="measure" class="mono">Click the model (desktop) or pull the trigger on it (VR).</div>
+
+  <h2>Quest controls</h2>
+  <table class="keys">
+    <tr><td>Grip</td><td>Grab model (move + rotate with your hand)</td></tr>
+    <tr><td>Both grips</td><td>Pull apart / push together = zoom, twist = rotate</td></tr>
+    <tr><td>Grab + stick</td><td>Stick ↑↓ zoom, ←→ spin around Z</td></tr>
+    <tr><td>Trigger</td><td>Pick point · 2nd point = distance</td></tr>
+    <tr><td>Left stick</td><td>Walk (gravity along −Z)</td></tr>
+    <tr><td>Right stick</td><td>Snap turn · ↑↓ up/down in fly mode</td></tr>
+    <tr><td>X</td><td>Model library (open files from server)</td></tr>
+    <tr><td>Y</td><td>Toggle walk / fly</td></tr>
+    <tr><td>A / B</td><td>Reset pose / wireframe</td></tr>
+    <tr><td>Stick click</td><td>Clear measurement</td></tr>
+  </table>
+  <p class="hint">Desktop: drag to orbit, right-drag to pan, wheel to zoom, click to measure.</p>
+</aside>
+
+<script type="module">
+import * as THREE from 'three';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+const $ = (id) => document.getElementById(id);
+const API = 'api.php';                       // served by server.py or by a real PHP host
+const UNITS = { mm: 0.001, cm: 0.01, m: 1, in: 0.0254 };
+const DZ = 0.15;                             // thumbstick dead zone
+const STEP = 0.45;                           // max step-up height when walking on a model (m)
+const UP = new THREE.Vector3(0, 1, 0);       // three.js "up" == world +Z (see `world` below)
+
+// ---------- optional BVH acceleration (fast raycasts on big meshes) ----------
+let bvhOK = false;
+try {
+  const bvh = await import('three-mesh-bvh');
+  THREE.BufferGeometry.prototype.computeBoundsTree = bvh.computeBoundsTree;
+  THREE.BufferGeometry.prototype.disposeBoundsTree = bvh.disposeBoundsTree;
+  THREE.Mesh.prototype.raycast = bvh.acceleratedRaycast;
+  bvhOK = true;
+} catch (e) { console.warn('three-mesh-bvh unavailable – using plain raycasting', e); }
+
+// ---------- state ----------
+const state = { units: 'mm', upAxis: 'Z', color: '#9fb4c8', wireframe: false, fly: false,
+                serverOK: false, models: [], fitted: false, hover: null };
+try { Object.assign(state, JSON.parse(localStorage.getItem('xrviewer') || '{}'), { fly: false, serverOK: false, models: [], hover: null }); } catch {}
+const saveSettings = () => { try { localStorage.setItem('xrviewer', JSON.stringify({ units: state.units, upAxis: state.upAxis, color: state.color, wireframe: state.wireframe })); } catch {} };
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFoveation?.(0.5);
+$('viewport').appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b2027);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 2000);
+camera.position.set(1.6, 1.8, 2.4);
+const dolly = new THREE.Group();            // the player rig (feet at dolly.position)
+dolly.add(camera);
+scene.add(dolly);
+
+// WebXR is Y-up. Everything model-related lives in `world`, rotated so that world +Z points up.
+// World coords (x, y, z) -> three coords (x, z, -y). Gravity therefore acts along world −Z.
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+world.updateMatrixWorld(true);
+
+scene.add(new THREE.HemisphereLight(0xeef3ff, 0x30343a, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5); sun.position.set(3, 6, 2); scene.add(sun);
+const headLight = new THREE.DirectionalLight(0xffffff, 0.9);
+headLight.position.set(0.3, 0.4, 0); camera.add(headLight); camera.add(headLight.target); headLight.target.position.set(0, 0, -1);
+
+const floor = new THREE.Mesh(new THREE.CircleGeometry(60, 64), new THREE.MeshStandardMaterial({ color: 0x232930, roughness: 1 }));
+floor.rotation.x = -Math.PI / 2; floor.position.y = -0.003; scene.add(floor);
+scene.add(new THREE.GridHelper(60, 60, 0x3d4a58, 0x2e3640));
+const fineGrid = new THREE.GridHelper(4, 40, 0x3d4a58, 0x2a313a); fineGrid.position.y = 0.001; scene.add(fineGrid);
+
+function makeLabel(text, color) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d'); x.font = 'bold 48px system-ui'; x.fillStyle = color; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(text, 32, 34);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false })); s.scale.setScalar(0.12); return s;
+}
+const axes = new THREE.AxesHelper(0.6); world.add(axes);
+[['X', '#ff5a5a', [0.68, 0, 0]], ['Y', '#6cff6c', [0, 0.68, 0]], ['Z', '#5aa0ff', [0, 0, 0.68]]].forEach(([t, c, p]) => { const l = makeLabel(t, c); l.position.set(...p); world.add(l); });
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1, 0); controls.enableDamping = true; controls.update();
+
+// ---------- model containers ----------
+const pivot = new THREE.Group();            // manipulated object; its origin = model bbox centre
+world.add(pivot);
+let content = null, meshes = [], model = null;
+const baseMat = new THREE.MeshStandardMaterial({ color: state.color, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide });
+const vcMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0, side: THREE.DoubleSide });
+
+// ---------- helpers ----------
+const fmt = (v) => { const a = Math.abs(v); return a >= 1000 ? v.toFixed(1) : a >= 10 ? v.toFixed(2) : v.toFixed(3); };
+const dz = (v) => (Math.abs(v) < DZ ? 0 : v);
+const nextFrame = () => new Promise((r) => setTimeout(r, 30));
+const extOf = (n) => n.split('.').pop().toLowerCase();
+const fmtBytes = (b) => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : (b / 1e3).toFixed(0) + ' kB';
+const rayEveryFrameOK = () => bvhOK || (model && model.tris < 300000);
+let infoDirty = true;
+
+function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = 'status ' + kind; state.statusText = text; infoDirty = true; }
+
+// ---------- canvas panels (VR UI) ----------
+class Panel {
+  constructor(w, h, metersWide) {
+    this.w = w; this.h = h;
+    this.canvas = document.createElement('canvas'); this.canvas.width = w; this.canvas.height = h;
+    this.ctx = this.canvas.getContext('2d');
+    this.tex = new THREE.CanvasTexture(this.canvas); this.tex.colorSpace = THREE.SRGBColorSpace;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(metersWide, metersWide * h / w),
+      new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, toneMapped: false }));
+  }
+  commit() { this.tex.needsUpdate = true; }
+}
+function rr(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function fitText(c, t, maxW) { if (c.measureText(t).width <= maxW) return t; while (t.length > 1 && c.measureText(t + '…').width > maxW) t = t.slice(0, -1); return t + '…'; }
+
+const infoPanel = new Panel(512, 680, 0.17);
+infoPanel.mesh.position.set(0, 0.11, 0.0);
+infoPanel.mesh.rotation.x = -Math.PI / 4;   // tilted toward the user's eyes
+
+const LIB = { visible: false, page: 0, per: 8, hover: null, msg: '' };
+const libPanel = new Panel(800, 900, 0.75);
+libPanel.mesh.visible = false; scene.add(libPanel.mesh);
+
+// ---------- measurement ----------
+const measure = { pts: [], objs: [] };
+const markerGeo = new THREE.SphereGeometry(1, 16, 12);
+const markerMat = new THREE.MeshBasicMaterial({ color: 0xffc23d, depthTest: false, transparent: true });
+const lineMat = new THREE.LineBasicMaterial({ color: 0xffc23d, depthTest: false, transparent: true });
+
+function addMeasurePoint(worldPoint) {
+  if (!content) return;
+  if (measure.pts.length >= 2) clearMeasure();
+  content.updateWorldMatrix(true, false);
+  const p = content.worldToLocal(worldPoint.clone());      // = coordinates in the file
+  measure.pts.push(p);
+  const mk = new THREE.Mesh(markerGeo, markerMat); mk.position.copy(p); mk.renderOrder = 999; content.add(mk); measure.objs.push(mk);
+  if (measure.pts.length === 2) {
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints(measure.pts), lineMat); ln.renderOrder = 998;
+    content.add(ln); measure.objs.push(ln);
+  }
+  updateMeasureUI();
+}
+function clearMeasure() {
+  measure.objs.forEach((o) => { o.parent?.remove(o); if (o.isLine) o.geometry.dispose(); });
+  measure.objs = []; measure.pts = []; updateMeasureUI();
+}
+function measureLines() {
+  const u = state.units, [a, b] = measure.pts;
+  if (!a) return ['Trigger / click on model = pick point'];
+  const L = [`P1  ${fmt(a.x)}, ${fmt(a.y)}, ${fmt(a.z)} ${u}`];
+  if (b) {
+    L.push(`P2  ${fmt(b.x)}, ${fmt(b.y)}, ${fmt(b.z)} ${u}`);
+    L.push(`Distance  ${fmt(a.distanceTo(b))} ${u}`);
+    L.push(`ΔX ${fmt(b.x - a.x)}  ΔY ${fmt(b.y - a.y)}  ΔZ ${fmt(b.z - a.z)}`);
+  }
+  return L;
+}
+function updateMeasureUI() { $('measure').textContent = measureLines().join('\n'); infoDirty = true; }
+function updateMarkers() {
+  if (!measure.objs.length) return;
+  const cam = camera.getWorldPosition(_v1), s = pivot.scale.x || 1;
+  for (const o of measure.objs) if (o.isMesh) { o.getWorldPosition(_v2); o.scale.setScalar(Math.max(0.002, _v2.distanceTo(cam) * 0.007) / s); }
+}
+
+// ---------- loading ----------
+function buildContent(buffer, name) {
+  const ext = extOf(name), geos = [];
+  if (ext === 'stl') {
+    geos.push(new STLLoader().parse(buffer));
+  } else if (ext === 'obj') {
+    const obj = new OBJLoader().parse(new TextDecoder().decode(buffer));
+    obj.updateMatrixWorld(true);
+    obj.traverse((o) => { if (o.isMesh) { o.geometry.applyMatrix4(o.matrixWorld); geos.push(o.geometry); } });
+  } else throw new Error('Unsupported format .' + ext);
+  if (!geos.length) throw new Error('No mesh data found in file');
+
+  const group = new THREE.Group(), list = [], box = new THREE.Box3();
+  let tris = 0, verts = 0;
+  for (const g of geos) {
+    if (!g.attributes.position || g.attributes.position.count === 0) continue;
+    if (!g.attributes.normal) g.computeVertexNormals();
+    g.computeBoundingBox(); g.computeBoundingSphere(); box.union(g.boundingBox);
+    if (bvhOK) { try { g.computeBoundsTree(); } catch (e) { console.warn(e); } }
+    const m = new THREE.Mesh(g, g.hasColors ? vcMat : baseMat);
+    group.add(m); list.push(m);
+    verts += g.attributes.position.count;
+    tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
+  }
+  if (!list.length) throw new Error('File contains no triangles');
+  const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+  group.position.copy(center).negate();      // pivot origin == bbox centre, file coords preserved inside
+  return { group, list, info: { tris: Math.round(tris), verts, size, center, box } };
+}
+
+function disposeModel() {
+  if (!content) return;
+  pivot.remove(content);
+  content.traverse((o) => { if (o.geometry && o.geometry !== markerGeo) { o.geometry.disposeBoundsTree?.(); o.geometry.dispose(); } });
+  content = null; meshes = []; model = null; measure.objs = []; measure.pts = [];
+  grab.mode = 'none';
+}
+
+function loadBuffer(buffer, name, onServer) {
+  const t0 = performance.now();
+  const built = buildContent(buffer, name);
+  disposeModel();
+  content = built.group; meshes = built.list; model = { ...built.info, name, onServer };
+  pivot.add(content);
+  applyMaterialSettings();
+  clearMeasure();
+  resetPose();
+  const url = new URL(location.href);
+  if (onServer) url.searchParams.set('model', name); else url.searchParams.delete('model');
+  history.replaceState(null, '', url);
+  setStatus(`Loaded ${name} · ${model.tris.toLocaleString()} triangles · ${Math.round(performance.now() - t0)} ms`, 'ok');
+  renderLibraryList();
+  if (renderer.xr.isPresenting) startGrab();
+}
+
+function modelBox() { const b = new THREE.Box3(); world.updateMatrixWorld(true); meshes.forEach((m) => b.expandByObject(m)); return b; }
+
+function resetPose() {
+  if (!content) return;
+  const unit = UNITS[state.units] || 0.001;
+  const maxDim = Math.max(model.size.x, model.size.y, model.size.z) || 1;
+  let s = unit; state.fitted = false;
+  if (maxDim * unit > 40 || maxDim * unit < 0.01) { s = 1 / maxDim; state.fitted = true; } // implausible size -> fit to 1 m
+  pivot.scale.setScalar(s);
+  pivot.rotation.set(state.upAxis === 'Y' ? Math.PI / 2 : 0, 0, 0);   // file Y-up -> world Z-up
+  pivot.position.set(0, 0, 0);
+  const box = modelBox(), ext = box.getSize(new THREE.Vector3());
+  const halfH = ext.y / 2, radius = ext.length() / 2, small = Math.max(ext.x, ext.y, ext.z) < 1.5;
+  const target = new THREE.Vector3();
+  if (renderer.xr.isPresenting) {
+    const head = camera.getWorldPosition(new THREE.Vector3());
+    const fwd = camera.getWorldDirection(new THREE.Vector3()); fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+    target.copy(head).addScaledVector(fwd, Math.max(0.7, radius + 0.45));
+    target.y = small ? Math.max(halfH + 0.02, head.y - 0.3) : halfH;    // small parts float at chest height
+  } else {
+    target.set(0, small ? Math.max(1.1, halfH + 0.05) : halfH, 0);      // big models stand on the floor (z = 0)
+  }
+  pivot.position.copy(world.worldToLocal(target));
+  world.updateMatrixWorld(true);
+  if (!renderer.xr.isPresenting) frameDesktop();
+  else if (grab.mode !== 'none') startGrab();
+  infoDirty = true;
+}
+
+function frameDesktop() {
+  if (!content) return;
+  const box = modelBox(), c = box.getCenter(new THREE.Vector3()), r = box.getBoundingSphere(new THREE.Sphere()).radius || 1;
+  controls.target.copy(c);
+  camera.position.copy(c).addScaledVector(new THREE.Vector3(0.55, 0.45, 1).normalize(), r * 2.6 + 0.2);
+  camera.near = Math.max(0.001, r / 200); camera.far = Math.max(200, r * 60); camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function applyMaterialSettings() {
+  baseMat.color.set(state.color);
+  baseMat.wireframe = vcMat.wireframe = state.wireframe;
+  $('wire').checked = state.wireframe;
+}
+function toggleWire() { state.wireframe = !state.wireframe; applyMaterialSettings(); saveSettings(); infoDirty = true; }
+function toggleFly() { state.fly = !state.fly; player.vy = 0; setStatus(state.fly ? 'Fly mode: right stick ↑↓ = up/down' : 'Walk mode: gravity along −Z'); }
+
+// ---------- server API ----------
+async function refreshLibrary() {
+  try {
+    const r = await fetch(`${API}?action=list`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'bad response');
+    state.serverOK = true; state.models = j.files || [];
+  } catch (e) {
+    state.serverOK = false; state.models = [];
+  }
+  $('uploadHint').textContent = state.serverOK
+    ? 'Files are uploaded into the same folder as index.html.'
+    : 'No upload server found – files open locally only. Run server.py (or use api.php on a PHP host).';
+  LIB.page = Math.min(LIB.page, Math.max(0, Math.ceil(state.models.length / LIB.per) - 1));
+  renderLibraryList(); drawLibrary();
+}
+
+function renderLibraryList() {
+  const ul = $('library'); ul.innerHTML = '';
+  const empty = (t) => { const li = document.createElement('li'); li.className = 'empty'; li.textContent = t; ul.appendChild(li); };
+  if (!state.serverOK) return empty('Upload server not reachable.');
+  if (!state.models.length) return empty('No models yet – upload one above.');
+  for (const m of state.models) {
+    const li = document.createElement('li');
+    const open = document.createElement('button'); open.className = 'open' + (model?.name === m.name ? ' current' : '');
+    const nm = document.createElement('span'); nm.className = 'name'; nm.textContent = m.name;
+    const meta = document.createElement('small'); meta.textContent = `${fmtBytes(m.size)} · ${new Date(m.mtime * 1000).toLocaleString()}`;
+    open.append(nm, meta); open.onclick = () => openFromServer(m.name);
+    const del = document.createElement('button'); del.className = 'del'; del.textContent = '✕'; del.title = 'Delete from server';
+    del.onclick = () => deleteFromServer(m.name);
+    li.append(open, del); ul.appendChild(li);
+  }
+}
+
+function uploadFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API}?action=upload&name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
+    xhr.onload = () => {
+      let j = null; try { j = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status === 200 && j?.ok) resolve(j); else reject(new Error(j?.error || `HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('network error'));
+    xhr.send(file);
+  });
+}
+
+async function handleFiles(fileList) {
+  const files = [...fileList].filter((f) => /\.(stl|obj)$/i.test(f.name));
+  if (!files.length) return setStatus('Only .stl and .obj files are supported', 'err');
+  let last = null, lastName = '', lastOnServer = false, failed = [];
+  for (const f of files) {
+    let name = f.name, onServer = false;
+    if (state.serverOK) {
+      try { const r = await uploadFile(f, (p) => setStatus(`Uploading ${f.name}… ${Math.round(p * 100)}%`)); name = r.name; onServer = true; }
+      catch (e) { failed.push(`${f.name} (${e.message})`); }
+    }
+    last = f; lastName = name; lastOnServer = onServer;
+  }
+  if (state.serverOK) await refreshLibrary();
+  try {
+    setStatus(`Opening ${lastName}…`); await nextFrame();
+    loadBuffer(await last.arrayBuffer(), lastName, lastOnServer);
+    if (failed.length) setStatus(`Opened locally. Upload failed: ${failed.join(', ')}`, 'err');
+  } catch (e) { console.error(e); setStatus(`Could not open ${lastName}: ${e.message}`, 'err'); }
+}
+
+async function openFromServer(name) {
+  try {
+    setStatus(`Downloading ${name}…`); LIB.msg = `Loading ${name}…`; drawLibrary();
+    const r = await fetch(encodeURIComponent(name));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const buf = await r.arrayBuffer();
+    setStatus(`Parsing ${name}…`); await nextFrame();
+    loadBuffer(buf, name, true);
+    hideLibrary();
+  } catch (e) { console.error(e); setStatus(`Could not open ${name}: ${e.message}`, 'err'); }
+  finally { LIB.msg = ''; drawLibrary(); }
+}
+
+async function deleteFromServer(name) {
+  if (!confirm(`Delete "${name}" from the server folder?`)) return;
+  try {
+    const r = await fetch(`${API}?action=delete&name=${encodeURIComponent(name)}`, { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || 'HTTP ' + r.status);
+    setStatus(`Deleted ${name}`, 'ok');
+  } catch (e) { setStatus(`Delete failed: ${e.message}`, 'err'); }
+  refreshLibrary();
+}
+
+// ---------- VR panels drawing ----------
+function drawInfo() {
+  const c = infoPanel.ctx, W = infoPanel.w, H = infoPanel.h;
+  c.clearRect(0, 0, W, H);
+  rr(c, 4, 4, W - 8, H - 8, 26); c.fillStyle = 'rgba(14,18,23,0.9)'; c.fill(); c.strokeStyle = '#2f3a46'; c.lineWidth = 3; c.stroke();
+  let y = 52; const x = 26, mw = W - 52;
+  const line = (t, font, color, gap) => { c.font = font; c.fillStyle = color; c.fillText(fitText(c, t, mw), x, y); y += gap; };
+  line('Inspector', 'bold 32px system-ui', '#5fe3ff', 42);
+  if (model) {
+    const ratio = pivot.scale.x / (UNITS[state.units] || 1);
+    const scaleTxt = Math.abs(ratio - 1) < 0.005 ? '1:1 real size' : `${(ratio * 100).toPrecision(3)} % of real size`;
+    line(model.name, 'bold 23px system-ui', '#ffffff', 32);
+    line(`${model.tris.toLocaleString()} triangles`, '21px system-ui', '#b8c4d0', 28);
+    line(`${fmt(model.size.x)} × ${fmt(model.size.y)} × ${fmt(model.size.z)} ${state.units}`, '21px system-ui', '#b8c4d0', 28);
+    line(`Scale: ${scaleTxt}`, '21px system-ui', '#b8c4d0', 28);
+  } else line('No model – press X for library', '22px system-ui', '#b8c4d0', 28);
+  line(`Mode: ${state.fly ? 'Fly' : 'Walk (gravity −Z)'}${state.wireframe ? ' · wire' : ''}`, '21px system-ui', '#b8c4d0', 34);
+  c.fillStyle = '#2f3a46'; c.fillRect(x, y - 18, mw, 2); y += 12;
+  for (const t of measureLines()) line(t, '21px ui-monospace,monospace', '#ffc23d', 28);
+  if (state.hover) line(`Pointer ${fmt(state.hover.x)}, ${fmt(state.hover.y)}, ${fmt(state.hover.z)}`, '19px ui-monospace,monospace', '#5fe3ff', 28);
+  y += 6; c.fillStyle = '#2f3a46'; c.fillRect(x, y - 18, mw, 2); y += 10;
+  if (state.statusText) line(state.statusText, '18px system-ui', '#8a97a6', 32);
+  const help = ['Grip: grab · 2 grips: zoom/rotate', 'Grab + stick: zoom / spin', 'Trigger: measure point', 'L stick: walk · R stick: turn',
+                'X: models · Y: walk/fly', 'A: reset · B: wireframe', 'Stick click: clear measure'];
+  y = Math.max(y, H - 24 - help.length * 25);
+  for (const t of help) line(t, '18px system-ui', '#7d8a99', 25);
+  infoPanel.commit();
+}
+
+function drawLibrary() {
+  const c = libPanel.ctx, W = libPanel.w, H = libPanel.h, n = state.models.length;
+  const pages = Math.max(1, Math.ceil(n / LIB.per));
+  c.clearRect(0, 0, W, H);
+  rr(c, 4, 4, W - 8, H - 8, 30); c.fillStyle = 'rgba(14,18,23,0.94)'; c.fill(); c.strokeStyle = '#2f3a46'; c.lineWidth = 4; c.stroke();
+  c.font = 'bold 40px system-ui'; c.fillStyle = '#5fe3ff'; c.fillText('Models on server', 36, 64);
+  c.font = '24px system-ui'; c.fillStyle = '#8a97a6';
+  c.fillText(LIB.msg || (!state.serverOK ? 'Server not reachable' : n ? `${n} file(s) · page ${LIB.page + 1}/${pages}` : 'Empty – upload from the desktop panel'), 36, 104);
+  for (let i = 0; i < LIB.per; i++) {
+    const idx = LIB.page * LIB.per + i; if (idx >= n) break;
+    const m = state.models[idx], y = 130 + i * 78;
+    const hov = LIB.hover?.type === 'item' && LIB.hover.row === i, cur = model?.name === m.name;
+    rr(c, 24, y + 4, W - 48, 70, 14); c.fillStyle = hov ? '#2b4a59' : cur ? '#22323d' : '#1d242c'; c.fill();
+    c.font = '28px system-ui'; c.fillStyle = '#ffffff'; c.fillText(fitText(c, m.name, W - 240), 44, y + 50);
+    c.font = '22px system-ui'; c.fillStyle = '#8a97a6'; c.textAlign = 'right'; c.fillText(fmtBytes(m.size), W - 44, y + 50); c.textAlign = 'left';
+  }
+  [['◀ Prev', 'prev', 24], ['Close', 'close', 280], ['Next ▶', 'next', 536]].forEach(([t, type, x]) => {
+    rr(c, x, 768, 240, 84, 16); c.fillStyle = LIB.hover?.type === type ? '#2b4a59' : '#252d36'; c.fill();
+    c.font = 'bold 30px system-ui'; c.fillStyle = '#d8e0e8'; c.textAlign = 'center'; c.fillText(t, x + 120, 820); c.textAlign = 'left';
+  });
+  libPanel.commit();
+}
+function libHitTest(uv) {
+  if (!uv) return null;
+  const x = uv.x * libPanel.w, y = (1 - uv.y) * libPanel.h;
+  if (y >= 130 && y < 130 + LIB.per * 78) {
+    const row = Math.floor((y - 130) / 78), idx = LIB.page * LIB.per + row;
+    return idx < state.models.length ? { type: 'item', row, idx } : null;
+  }
+  if (y >= 768 && y <= 852) return { type: x < 268 ? 'prev' : x < 532 ? 'close' : 'next' };
+  return null;
+}
+function libAction(a) {
+  if (!a) return;
+  const pages = Math.max(1, Math.ceil(state.models.length / LIB.per));
+  if (a.type === 'item') openFromServer(state.models[a.idx].name);
+  else if (a.type === 'prev') LIB.page = (LIB.page - 1 + pages) % pages;
+  else if (a.type === 'next') LIB.page = (LIB.page + 1) % pages;
+  else if (a.type === 'close') hideLibrary();
+  drawLibrary();
+}
+function showLibrary() {
+  const head = camera.getWorldPosition(new THREE.Vector3());
+  const fwd = camera.getWorldDirection(new THREE.Vector3()); fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+  libPanel.mesh.position.copy(head).addScaledVector(fwd, 1.1); libPanel.mesh.position.y = head.y - 0.1;
+  libPanel.mesh.lookAt(head.x, libPanel.mesh.position.y, head.z);
+  libPanel.mesh.visible = LIB.visible = true;
+  refreshLibrary();
+}
+function hideLibrary() { libPanel.mesh.visible = LIB.visible = false; LIB.hover = null; }
+
+// ---------- XR controllers ----------
+const factory = new XRControllerModelFactory();
+const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+const hands = [0, 1].map((i) => {
+  const ctrl = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+  grip.add(factory.createControllerModel(grip));
+  dolly.add(ctrl, grip);
+  const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }));
+  ray.scale.z = 4; ray.visible = false; ctrl.add(ray);
+  const reticle = new THREE.Mesh(new THREE.RingGeometry(0.004, 0.008, 24), new THREE.MeshBasicMaterial({ color: 0x5fe3ff, depthTest: false, side: THREE.DoubleSide }));
+  reticle.renderOrder = 1000; reticle.visible = false; scene.add(reticle);
+  const h = { i, ctrl, grip, ray, reticle, gamepad: null, side: i === 0 ? 'left' : 'right', prev: [], gripHeld: false, turnLatch: false };
+  ctrl.addEventListener('connected', (e) => {
+    h.gamepad = e.data.gamepad || null;          // null for hand tracking
+    if (e.data.handedness && e.data.handedness !== 'none') h.side = e.data.handedness;
+    ray.visible = !!h.gamepad;
+    if (h.side === 'left') grip.add(infoPanel.mesh);
+    infoDirty = true;
+  });
+  ctrl.addEventListener('disconnected', () => {
+    h.gamepad = null; h.prev = []; h.gripHeld = false; ray.visible = reticle.visible = false;
+    if (infoPanel.mesh.parent === grip) grip.remove(infoPanel.mesh);
+    startGrab();
+  });
+  return h;
+});
+
+function pollInput(h) {
+  const gp = h.gamepad; if (!gp) return null;
+  const pressed = Array.from(gp.buttons, (b) => b.pressed);
+  const down = pressed.map((p, k) => p && !h.prev[k]);
+  h.prev = pressed;
+  const a = gp.axes;
+  return { pressed, down, sx: a.length >= 4 ? a[2] : a[0] || 0, sy: a.length >= 4 ? a[3] : a[1] || 0 };
+}
+
+// ---------- grabbing / manipulation ----------
+const grab = { mode: 'none', hand: null, h1: null, h2: null, offset: new THREE.Matrix4(), M0: new THREE.Matrix4(),
+               p1: new THREE.Vector3(), p2: new THREE.Vector3(), d0: 1 };
+const _m1 = new THREE.Matrix4(), _m2 = new THREE.Matrix4(), _m3 = new THREE.Matrix4(), _W = new THREE.Matrix4();
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _v4 = new THREE.Vector3(), _sc = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+
+function gripPos(h, v) { return v.setFromMatrixPosition(h.grip.matrixWorld); }
+function pivotWorld(m) { pivot.updateWorldMatrix(true, false); return m.copy(pivot.matrixWorld); }
+function setPivotWorld(m) {
+  _m3.copy(world.matrixWorld).invert().multiply(m);
+  _m3.decompose(pivot.position, pivot.quaternion, _sc);
+  pivot.scale.setScalar(THREE.MathUtils.clamp((_sc.x + _sc.y + _sc.z) / 3, 1e-7, 1e7));
+  pivot.updateMatrixWorld(true);
+}
+function startGrab() {
+  const held = hands.filter((h) => h.gripHeld && h.gamepad);
+  scene.updateMatrixWorld(true);
+  if (!content || !held.length) { grab.mode = 'none'; grab.hand = null; return; }
+  if (held.length === 1) {
+    grab.mode = 'one'; grab.hand = held[0];
+    grab.offset.copy(held[0].grip.matrixWorld).invert().multiply(pivotWorld(_m1));
+  } else {
+    grab.mode = 'two'; grab.h1 = held[0]; grab.h2 = held[1];
+    gripPos(grab.h1, grab.p1); gripPos(grab.h2, grab.p2);
+    grab.d0 = Math.max(1e-4, grab.p1.distanceTo(grab.p2));
+    pivotWorld(grab.M0);
+  }
+}
+function applyGrab(inputs, dt) {
+  if (grab.mode === 'one') {
+    const h = grab.hand, inp = inputs[h.i];
+    _W.multiplyMatrices(h.grip.matrixWorld, grab.offset);
+    const sx = inp ? dz(inp.sx) : 0, sy = inp ? dz(inp.sy) : 0;
+    if (sx || sy) {                                   // stick while holding: zoom + spin around vertical (Z) through model centre
+      const c = _v1.setFromMatrixPosition(_W), f = Math.exp(-sy * dt * 1.6);
+      _m1.makeTranslation(-c.x, -c.y, -c.z);
+      _m1.premultiply(_m2.makeScale(f, f, f));
+      _m1.premultiply(_m2.makeRotationY(-sx * dt * 2.0));
+      _m1.premultiply(_m2.makeTranslation(c.x, c.y, c.z));
+      _W.premultiply(_m1);
+      grab.offset.copy(h.grip.matrixWorld).invert().multiply(_W);
+      infoDirty = true;
+    }
+    setPivotWorld(_W);
+  } else if (grab.mode === 'two') {
+    const q1 = gripPos(grab.h1, _v1), q2 = gripPos(grab.h2, _v2);
+    const s = q1.distanceTo(q2) / grab.d0;
+    _q.setFromUnitVectors(_v3.subVectors(grab.p2, grab.p1).normalize(), _v4.subVectors(q2, q1).normalize());
+    const pm = _v3.addVectors(grab.p1, grab.p2).multiplyScalar(0.5), qm = _v4.addVectors(q1, q2).multiplyScalar(0.5);
+    _m1.makeTranslation(-pm.x, -pm.y, -pm.z);
+    _m1.premultiply(_m2.makeScale(s, s, s));
+    _m1.premultiply(_m2.makeRotationFromQuaternion(_q));
+    _m1.premultiply(_m2.makeTranslation(qm.x, qm.y, qm.z));
+    _W.multiplyMatrices(_m1, grab.M0);
+    setPivotWorld(_W);
+    infoDirty = true;
+  }
+}
+
+// ---------- locomotion with gravity along world −Z ----------
+const player = { vy: 0 };
+const raycaster = new THREE.Raycaster(); raycaster.firstHitOnly = true;
+const _down = new THREE.Vector3(0, -1, 0), _rot = new THREE.Matrix4();
+
+function snapTurn(angle) {
+  const head = camera.getWorldPosition(_v1);
+  dolly.position.sub(head).applyAxisAngle(UP, angle).add(head);
+  dolly.rotation.y += angle;
+}
+function updateLocomotion(inputs, dt) {
+  const busy = (h) => grab.mode === 'two' || (grab.mode === 'one' && grab.hand === h);
+  const L = hands.find((h) => h.side === 'left' && h.gamepad), R = hands.find((h) => h.side === 'right' && h.gamepad);
+  const speed = state.fly ? 3 : 1.8;
+  if (L && !busy(L)) {
+    const sx = dz(inputs[L.i].sx), sy = dz(inputs[L.i].sy);
+    if (sx || sy) {
+      const fwd = camera.getWorldDirection(_v2); fwd.y = 0;
+      if (fwd.lengthSq() > 1e-6) {
+        fwd.normalize();
+        const right = _v3.crossVectors(fwd, UP).normalize();
+        dolly.position.addScaledVector(fwd, -sy * speed * dt).addScaledVector(right, sx * speed * dt);
+      }
+    }
+  }
+  if (R && !busy(R)) {
+    const sx = inputs[R.i].sx, sy = dz(inputs[R.i].sy);
+    if (!R.turnLatch && Math.abs(sx) > 0.7) { snapTurn(-Math.sign(sx) * Math.PI / 6); R.turnLatch = true; }
+    else if (Math.abs(sx) < 0.3) R.turnLatch = false;
+    if (state.fly && sy) dolly.position.y -= sy * speed * dt;
+  }
+}
+function updateGravity(dt) {
+  if (state.fly) { player.vy = 0; return; }
+  let ground = 0;                                     // floor plane z = 0
+  if (content && grab.mode === 'none' && rayEveryFrameOK()) {     // stand on top of the model surface
+    const head = camera.getWorldPosition(_v1);
+    raycaster.set(_v2.set(head.x, dolly.position.y + STEP, head.z), _down); raycaster.far = 1e4;
+    const hit = raycaster.intersectObjects(meshes, false)[0];
+    if (hit) ground = Math.max(ground, hit.point.y);
+  }
+  player.vy -= 9.81 * dt;
+  dolly.position.y += player.vy * dt;
+  if (dolly.position.y <= ground) { dolly.position.y = ground; player.vy = 0; }
+}
+
+// ---------- pointers & buttons ----------
+function setRayFrom(ctrl) {
+  _rot.identity().extractRotation(ctrl.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(ctrl.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(_rot);
+  raycaster.far = 200;
+}
+function updatePointers(inputs) {
+  let libHover = null, hover = null;
+  for (const h of hands) {
+    const inp = inputs[h.i];
+    if (!inp) { h.reticle.visible = false; continue; }
+    setRayFrom(h.ctrl);
+    let hit = null;
+    if (LIB.visible) {
+      hit = raycaster.intersectObject(libPanel.mesh, false)[0];
+      if (hit) { const a = libHitTest(hit.uv); libHover = libHover || a; if (inp.down[0]) libAction(a); }
+    } else if (content && (rayEveryFrameOK() || inp.pressed[0])) {
+      hit = raycaster.intersectObjects(meshes, false)[0];
+      if (hit) {
+        if (inp.down[0]) addMeasurePoint(hit.point);
+        if (h.side === 'right' || !hover) hover = content.worldToLocal(hit.point.clone());
+      }
+    }
+    h.ray.scale.z = hit ? hit.distance : 4;
+    h.reticle.visible = !!hit;
+    if (hit) { h.reticle.position.copy(hit.point); h.reticle.lookAt(raycaster.ray.origin); }
+  }
+  if (JSON.stringify(libHover) !== JSON.stringify(LIB.hover)) { LIB.hover = libHover; drawLibrary(); }
+  if (hover || state.hover) { state.hover = hover; infoDirty = true; }
+}
+function updateButtons(inputs) {
+  for (const h of hands) {
+    const inp = inputs[h.i]; if (!inp) continue;
+    if (inp.down[3]) clearMeasure();                                  // thumbstick click
+    if (h.side === 'right') {
+      if (inp.down[4]) { resetPose(); setStatus('Pose reset'); }     // A
+      if (inp.down[5]) toggleWire();                                  // B
+    } else {
+      if (inp.down[4]) (LIB.visible ? hideLibrary() : showLibrary()); // X
+      if (inp.down[5]) toggleFly();                                   // Y
+    }
+  }
+}
+function updateXR(dt) {
+  const inputs = hands.map(pollInput);
+  let gripChanged = false;
+  for (const h of hands) {
+    const held = !!inputs[h.i]?.pressed[1] && !!content;
+    if (held !== h.gripHeld) { h.gripHeld = held; gripChanged = true; }
+  }
+  updateButtons(inputs);
+  updateLocomotion(inputs, dt);
+  updateGravity(dt);
+  scene.updateMatrixWorld(true);                 // fresh controller matrices after moving the rig
+  if (gripChanged) startGrab();
+  applyGrab(inputs, dt);
+  updatePointers(inputs);
+}
+
+// ---------- session events ----------
+let desktopCam = null;
+renderer.xr.addEventListener('sessionstart', () => {
+  controls.enabled = false;
+  desktopCam = { pos: camera.position.clone(), quat: camera.quaternion.clone(), near: camera.near, far: camera.far };
+  camera.near = 0.02; camera.far = 1000; camera.updateProjectionMatrix();
+  player.vy = 0; dolly.rotation.set(0, 0, 0);
+  if (content) {
+    const box = modelBox(), c = box.getCenter(new THREE.Vector3()), r = box.getBoundingSphere(new THREE.Sphere()).radius;
+    dolly.position.set(c.x, 0, c.z + Math.max(1.0, r + 0.7));      // stand just outside the model, facing it (+Y world)
+  } else dolly.position.set(0, 0, 1.5);
+  infoDirty = true;
+});
+renderer.xr.addEventListener('sessionend', () => {
+  hideLibrary(); grab.mode = 'none'; hands.forEach((h) => { h.gripHeld = false; h.reticle.visible = false; });
+  dolly.position.set(0, 0, 0); dolly.rotation.set(0, 0, 0);
+  if (desktopCam) { camera.position.copy(desktopCam.pos); camera.quaternion.copy(desktopCam.quat); camera.near = desktopCam.near; camera.far = desktopCam.far; camera.updateProjectionMatrix(); }
+  controls.enabled = true; controls.update();
+  state.hover = null; infoDirty = true;
+});
+
+// ---------- desktop interaction ----------
+let downXY = null;
+const ndc = new THREE.Vector2();
+renderer.domElement.addEventListener('pointerdown', (e) => { downXY = [e.clientX, e.clientY, e.button]; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!downXY || renderer.xr.isPresenting || !content) return;
+  const [x0, y0, btn] = downXY; downXY = null;
+  if (btn !== 0 || Math.hypot(e.clientX - x0, e.clientY - y0) > 4) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera); raycaster.far = Infinity;
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if (hit) addMeasurePoint(hit.point);
+});
+
+function updateInfoUI() {
+  const dl = $('info'); dl.innerHTML = '';
+  const add = (k, v) => { const dt = document.createElement('dt'), dd = document.createElement('dd'); dt.textContent = k; dd.textContent = v; dl.append(dt, dd); };
+  if (!model) { add('Model', '—'); add('Raycast', bvhOK ? 'BVH accelerated' : 'plain'); return; }
+  const u = state.units, ratio = pivot.scale.x / (UNITS[u] || 1);
+  add('File', model.name + (model.onServer ? '' : ' (local only)'));
+  add('Triangles', model.tris.toLocaleString());
+  add('Vertices', model.verts.toLocaleString());
+  add('Size', `${fmt(model.size.x)} × ${fmt(model.size.y)} × ${fmt(model.size.z)} ${u}`);
+  add('Min', `${fmt(model.box.min.x)}, ${fmt(model.box.min.y)}, ${fmt(model.box.min.z)}`);
+  add('Max', `${fmt(model.box.max.x)}, ${fmt(model.box.max.y)}, ${fmt(model.box.max.z)}`);
+  add('Scale', Math.abs(ratio - 1) < 0.005 ? '1:1 (real size)' : `${(ratio * 100).toPrecision(3)} %${state.fitted ? ' (auto-fit)' : ''}`);
+  add('Raycast', bvhOK ? 'BVH accelerated' : 'plain');
+}
+
+$('fileInput').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
+window.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+window.addEventListener('drop', (e) => { e.preventDefault(); document.body.classList.remove('dragging'); if (e.dataTransfer?.files?.length) handleFiles(e.dataTransfer.files); });
+$('units').value = state.units; $('upAxis').value = state.upAxis; $('color').value = state.color; $('wire').checked = state.wireframe;
+$('units').onchange = (e) => { state.units = e.target.value; saveSettings(); resetPose(); updateMeasureUI(); };
+$('upAxis').onchange = (e) => { state.upAxis = e.target.value; saveSettings(); resetPose(); };
+$('color').oninput = (e) => { state.color = e.target.value; applyMaterialSettings(); saveSettings(); };
+$('wire').onchange = (e) => { state.wireframe = e.target.checked; applyMaterialSettings(); saveSettings(); infoDirty = true; };
+$('resetBtn').onclick = resetPose;
+$('clearBtn').onclick = clearMeasure;
+$('refresh').onclick = refreshLibrary;
+$('collapse').onclick = () => { $('ui').classList.toggle('collapsed'); $('collapse').textContent = $('ui').classList.contains('collapsed') ? '⟩' : '⟨'; };
+window.addEventListener('resize', () => {
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- main loop ----------
+const clock = new THREE.Clock();
+let lastInfo = 0;
+renderer.setAnimationLoop((t) => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (renderer.xr.isPresenting) updateXR(dt); else controls.update();
+  updateMarkers();
+  if (infoDirty && t - lastInfo > 120) { drawInfo(); updateInfoUI(); infoDirty = false; lastInfo = t; }
+  renderer.render(scene, camera);
+});
+
+// ---------- start ----------
+applyMaterialSettings(); drawInfo(); drawLibrary(); updateMeasureUI();
+await refreshLibrary();
+const startModel = new URLSearchParams(location.search).get('model');
+if (startModel) openFromServer(startModel);
+else setStatus(state.serverOK ? 'Ready – pick a model or upload one.' : 'Ready – no upload server, files open locally.');
+</script>
+</body>
+</html>
